@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from tradingview_mcp.core.services.indicators import (
     compute_metrics, extract_extended_indicators, analyze_timeframe_context,
     compute_stock_score, compute_trade_setup, compute_trade_quality,
+    compute_fibonacci_levels, analyze_fibonacci_position, detect_trend_for_fibonacci,
 )
 from tradingview_mcp.core.services.coinlist import load_symbols
 from tradingview_mcp.core.utils.validators import sanitize_timeframe, sanitize_exchange, EXCHANGE_SCREENER, ALLOWED_TIMEFRAMES, STOCK_EXCHANGES, is_stock_exchange, get_market_type
@@ -436,6 +437,34 @@ def coin_analysis(
             # Timeframe-specific context and advice
             tf_context = analyze_timeframe_context(indicators, timeframe)
 
+            # --- Trade Setup for Stock Exchanges ---
+            trade_data = {}
+            if is_stock_exchange(exchange):
+                score_result = compute_stock_score(indicators)
+                if score_result:
+                    trade_data["stock_score"] = score_result["score"]
+                    trade_data["grade"] = score_result["grade"]
+                    trade_data["trend_state"] = score_result["trend_state"]
+
+                    setup = compute_trade_setup(indicators)
+                    if setup:
+                        trade_data["trade_setup"] = {
+                            "setup_types": setup["setup_types"],
+                            "entry_points": setup["entry_points"],
+                            "stop_loss": setup["stop_loss"],
+                            "stop_distance_pct": setup["stop_distance_pct"],
+                            "targets": setup["targets"],
+                            "risk_reward": setup["risk_reward"],
+                            "supports": setup["supports"],
+                            "resistances": setup["resistances"],
+                        }
+
+                        quality = compute_trade_quality(indicators, score_result["score"], setup)
+                        if quality:
+                            trade_data["trade_quality_score"] = quality["trade_quality_score"]
+                            trade_data["trade_quality"] = quality["quality"]
+                            trade_data["trade_notes"] = quality["notes"]
+
             return {
                 "symbol": full_symbol,
                 "exchange": exchange,
@@ -471,7 +500,8 @@ def coin_analysis(
                     "buy_sell_signal": metrics['signal'],
                     "volatility": "High" if metrics['bbw'] and metrics['bbw'] > 0.05 else "Medium" if metrics['bbw'] and metrics['bbw'] > 0.02 else "Low",
                     "momentum": "Bullish" if metrics['change'] > 0 else "Bearish"
-                }
+                },
+                **trade_data,
             }
             
         except Exception as e:
@@ -2662,6 +2692,186 @@ def egx_trade_plan(
     output["disclaimer"] = "For educational/informational purposes only. Not financial advice."
 
     return output
+
+
+@mcp.tool()
+def egx_fibonacci_retracement(
+    symbol: str,
+    lookback: str = "52W",
+    timeframe: str = "1D"
+) -> dict:
+    """Fibonacci retracement analysis for EGX stocks — identifies key support/resistance
+    levels at standard Fibonacci ratios (23.6%, 38.2%, 50%, 61.8%, 78.6%).
+
+    Calculates retracement and extension levels from the period swing high/low,
+    detects trend direction, and shows where the current price sits relative to
+    key Fibonacci zones (golden pocket, 50% retracement, etc.).
+
+    Args:
+        symbol: EGX stock symbol (e.g., "COMI", "TMGH", "FWRY")
+        lookback: Period for swing high/low detection — "1M", "3M", "6M", "52W", "ALL" (default 52W)
+        timeframe: Analysis timeframe for current indicators — 5m, 15m, 1h, 4h, 1D, 1W, 1M (default 1D)
+
+    Returns:
+        Fibonacci retracement & extension levels, price position analysis, key zones, and context.
+    """
+    from tradingview_mcp.core.data.egx_sectors import get_sector, get_currency
+
+    if not TRADINGVIEW_TA_AVAILABLE:
+        return {"error": "tradingview_ta is missing; run `uv sync`."}
+
+    timeframe = sanitize_timeframe(timeframe, "1D")
+    lookback = lookback.strip().upper()
+    valid_lookbacks = {"1M", "3M", "6M", "52W", "ALL"}
+    if lookback not in valid_lookbacks:
+        return {"error": f"Invalid lookback: {lookback}", "valid": sorted(valid_lookbacks)}
+
+    if ":" not in symbol:
+        full_symbol = f"EGX:{symbol.upper()}"
+    else:
+        full_symbol = symbol.upper()
+
+    screener = EXCHANGE_SCREENER.get("egx", "egypt")
+
+    # ── Step 1: Get period high/low via tradingview_screener ──────────────
+    swing_high = None
+    swing_low = None
+    swing_source = None
+
+    LOOKBACK_COLUMNS = {
+        "1M":  ("High.1M", "Low.1M"),
+        "3M":  ("High.3M", "Low.3M"),
+        "6M":  ("High.6M", "Low.6M"),
+        "52W": ("price_52_week_high", "price_52_week_low"),
+        "ALL": ("High.All", "Low.All"),
+    }
+
+    if TRADINGVIEW_SCREENER_AVAILABLE:
+        try:
+            high_col, low_col = LOOKBACK_COLUMNS[lookback]
+            q = (
+                Query()
+                .set_markets("egypt")
+                .select("close", high_col, low_col)
+                .set_tickers([full_symbol])
+            )
+            _, df = q.get_scanner_data()
+            if not df.empty:
+                row = df.iloc[0]
+                h = row.get(high_col)
+                l = row.get(low_col)
+                if h is not None and l is not None and h > l:
+                    swing_high = float(h)
+                    swing_low = float(l)
+                    swing_source = f"screener ({lookback} period high/low)"
+        except Exception:
+            pass  # Fall through to fallback
+
+    # ── Step 2: Get current indicators via tradingview_ta ─────────────────
+    try:
+        analysis = get_multiple_analysis(
+            screener=screener, interval=timeframe, symbols=[full_symbol]
+        )
+    except Exception as e:
+        return {"error": f"Analysis failed: {str(e)}"}
+
+    if full_symbol not in analysis or analysis[full_symbol] is None:
+        return {"error": f"No data found for {full_symbol}"}
+
+    ind = analysis[full_symbol].indicators
+    close = ind.get("close")
+    if not close:
+        return {"error": f"No price data for {full_symbol}"}
+
+    # ── Fallback: Use Fibonacci pivot R3/S3 as swing proxies ──────────────
+    if swing_high is None or swing_low is None:
+        fib_r3 = ind.get("Pivot.M.Fibonacci.R3")
+        fib_s3 = ind.get("Pivot.M.Fibonacci.S3")
+        classic_r3 = ind.get("Pivot.M.Classic.R3")
+        classic_s3 = ind.get("Pivot.M.Classic.S3")
+
+        h_candidate = fib_r3 or classic_r3
+        l_candidate = fib_s3 or classic_s3
+
+        if h_candidate and l_candidate and h_candidate > l_candidate:
+            swing_high = float(h_candidate)
+            swing_low = float(l_candidate)
+            swing_source = "pivot points (R3/S3 fallback)"
+        else:
+            return {
+                "error": "Could not determine swing high/low for Fibonacci calculation",
+                "hint": "Period high/low data not available for this symbol",
+            }
+
+    # Validate range
+    swing_range_pct = ((swing_high - swing_low) / swing_low) * 100
+    if swing_range_pct < 2:
+        return {
+            "error": f"Swing range too narrow ({swing_range_pct:.1f}%) for meaningful Fibonacci levels",
+            "swing_high": round(swing_high, 2),
+            "swing_low": round(swing_low, 2),
+        }
+
+    # ── Step 3: Compute Fibonacci ─────────────────────────────────────────
+    ema50 = ind.get("EMA50")
+    ema200 = ind.get("EMA200")
+    trend, trend_reasoning = detect_trend_for_fibonacci(
+        close, swing_high, swing_low, ema50, ema200
+    )
+
+    fib_levels = compute_fibonacci_levels(swing_high, swing_low, trend)
+    position = analyze_fibonacci_position(close, fib_levels)
+
+    # ── Step 4: Context indicators ────────────────────────────────────────
+    rsi_val = ind.get("RSI")
+    atr_val = ind.get("ATR")
+    vol = ind.get("volume")
+    vol_sma = ind.get("volume.SMA20")
+    vol_ratio = round(vol / vol_sma, 2) if vol and vol_sma and vol_sma > 0 else None
+
+    metrics = compute_metrics(ind)
+    change_pct = round(((close - ind.get("open", close)) / ind.get("open", close)) * 100, 2) if ind.get("open") else None
+
+    # ── Step 5: Build interpretation ──────────────────────────────────────
+    interp_parts = []
+    interp_parts.append(
+        f"Price is at {position['retracement_depth_pct']}% retracement of the {trend}."
+    )
+    if position["key_zone"]:
+        interp_parts.append(f"Currently in {position['key_zone']}.")
+    if position["fib_supports"]:
+        nearest_s = position["fib_supports"][0]
+        interp_parts.append(f"Key Fib support at {nearest_s['price']} ({nearest_s['ratio']}).")
+    if position["fib_resistances"]:
+        nearest_r = position["fib_resistances"][0]
+        interp_parts.append(f"Key Fib resistance at {nearest_r['price']} ({nearest_r['ratio']}).")
+
+    return {
+        "symbol": full_symbol,
+        "sector": get_sector(full_symbol),
+        "timeframe": timeframe,
+        "lookback_period": lookback,
+        "price": round(close, 2),
+        "change_pct": change_pct,
+        "swing_high": round(swing_high, 2),
+        "swing_low": round(swing_low, 2),
+        "swing_range_pct": round(swing_range_pct, 1),
+        "swing_source": swing_source,
+        "trend": trend,
+        "trend_reasoning": trend_reasoning,
+        "retracement_levels": fib_levels["retracement_levels"],
+        "extension_levels": fib_levels["extension_levels"],
+        "price_position": position,
+        "context": {
+            "rsi": round(rsi_val, 1) if rsi_val else None,
+            "ema50": round(ema50, 2) if ema50 else None,
+            "ema200": round(ema200, 2) if ema200 else None,
+            "atr": round(atr_val, 2) if atr_val else None,
+            "volume_ratio": vol_ratio,
+        },
+        "interpretation": " ".join(interp_parts),
+        "disclaimer": "For educational/informational purposes only. Not financial advice.",
+    }
 
 
 def _safe_round(value, decimals: int = 4):

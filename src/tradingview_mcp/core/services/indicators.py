@@ -1482,3 +1482,158 @@ def compute_trade_quality(indicators: Dict, stock_score: int, trade_setup: Dict)
         "breakdown": breakdown,
         "notes": notes,
     }
+
+
+# ---------------------------------------------------------------------------
+# Fibonacci Retracement Analysis
+# ---------------------------------------------------------------------------
+
+_FIB_RETRACEMENT_RATIOS = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+_FIB_EXTENSION_RATIOS = [1.272, 1.618, 2.618]
+
+
+def detect_trend_for_fibonacci(
+    close: float,
+    swing_high: float,
+    swing_low: float,
+    ema50: Optional[float] = None,
+    ema200: Optional[float] = None,
+) -> Tuple[str, str]:
+    """Determine trend direction for Fibonacci drawing.
+
+    Returns (trend, reasoning) where trend is 'uptrend' or 'downtrend'.
+    """
+    midpoint = (swing_high + swing_low) / 2
+    ema_bullish = ema50 is not None and ema200 is not None and ema50 > ema200
+    ema_bearish = ema50 is not None and ema200 is not None and ema50 < ema200
+
+    if close >= midpoint:
+        trend = "uptrend"
+        reason = f"Price ({close:.2f}) above midpoint ({midpoint:.2f})"
+        if ema_bullish:
+            reason += "; EMA50 > EMA200 confirms"
+        elif ema_bearish:
+            reason += "; note: EMA50 < EMA200 (mixed signal)"
+    else:
+        trend = "downtrend"
+        reason = f"Price ({close:.2f}) below midpoint ({midpoint:.2f})"
+        if ema_bearish:
+            reason += "; EMA50 < EMA200 confirms"
+        elif ema_bullish:
+            reason += "; note: EMA50 > EMA200 (mixed signal)"
+
+    return trend, reason
+
+
+def compute_fibonacci_levels(
+    swing_high: float, swing_low: float, trend: str
+) -> Dict:
+    """Calculate Fibonacci retracement and extension levels.
+
+    For uptrend: 0% = swing_high (start), 100% = swing_low (full retrace).
+    For downtrend: 0% = swing_low (start), 100% = swing_high (full retrace).
+    """
+    diff = swing_high - swing_low
+
+    retracement = {}
+    for ratio in _FIB_RETRACEMENT_RATIOS:
+        if trend == "uptrend":
+            price = swing_high - ratio * diff
+        else:
+            price = swing_low + ratio * diff
+        retracement[str(ratio)] = _safe_round(price, 2)
+
+    extensions = {}
+    for ratio in _FIB_EXTENSION_RATIOS:
+        if trend == "uptrend":
+            price = swing_high + (ratio - 1.0) * diff
+        else:
+            price = swing_low - (ratio - 1.0) * diff
+        extensions[str(ratio)] = _safe_round(price, 2)
+
+    return {
+        "swing_high": _safe_round(swing_high, 2),
+        "swing_low": _safe_round(swing_low, 2),
+        "trend": trend,
+        "retracement_levels": retracement,
+        "extension_levels": extensions,
+    }
+
+
+def analyze_fibonacci_position(close: float, fib_levels: Dict) -> Dict:
+    """Analyze where the current price sits relative to Fibonacci levels."""
+    retrace = fib_levels["retracement_levels"]
+    # Build sorted list of (ratio_str, price) by price ascending
+    sorted_levels = sorted(retrace.items(), key=lambda x: x[1])
+
+    # Find current zone (between which two levels)
+    current_zone = None
+    for i in range(len(sorted_levels) - 1):
+        lo_ratio, lo_price = sorted_levels[i]
+        hi_ratio, hi_price = sorted_levels[i + 1]
+        if lo_price <= close <= hi_price:
+            current_zone = f"Between {lo_ratio} ({lo_price}) and {hi_ratio} ({hi_price})"
+            break
+
+    if current_zone is None:
+        if close < sorted_levels[0][1]:
+            current_zone = f"Below all levels (below {sorted_levels[0][0]} at {sorted_levels[0][1]})"
+        else:
+            current_zone = f"Above all levels (above {sorted_levels[-1][0]} at {sorted_levels[-1][1]})"
+
+    # Nearest level
+    nearest = min(sorted_levels, key=lambda x: abs(x[1] - close))
+    nearest_dist_pct = _safe_round(((close - nearest[1]) / close) * 100, 2) if close else 0
+
+    # Key zone detection
+    key_zone = None
+    fib_618 = retrace.get("0.618")
+    fib_5 = retrace.get("0.5")
+    fib_786 = retrace.get("0.786")
+
+    if fib_618 and fib_786:
+        golden_lo = min(fib_618, fib_786)
+        golden_hi = max(fib_618, fib_786)
+        if golden_lo <= close <= golden_hi:
+            key_zone = "Golden Pocket (0.618-0.786)"
+
+    if key_zone is None and fib_5:
+        if abs(close - fib_5) / close * 100 < 1.5:
+            key_zone = "50% Retracement Zone"
+
+    if key_zone is None and fib_618:
+        if abs(close - fib_618) / close * 100 < 1.5:
+            key_zone = "0.618 Level (Golden Ratio)"
+
+    # Retracement depth
+    swing_high = fib_levels["swing_high"]
+    swing_low = fib_levels["swing_low"]
+    rng = swing_high - swing_low
+    if rng > 0:
+        if fib_levels["trend"] == "uptrend":
+            depth = ((swing_high - close) / rng) * 100
+        else:
+            depth = ((close - swing_low) / rng) * 100
+    else:
+        depth = 0
+    depth = _safe_round(max(0, depth), 1)
+
+    # Supports and resistances from fib levels
+    fib_supports = [{"ratio": r, "price": p} for r, p in sorted_levels if p < close]
+    fib_resistances = [{"ratio": r, "price": p} for r, p in sorted_levels if p > close]
+    # Nearest supports first, nearest resistances first
+    fib_supports = sorted(fib_supports, key=lambda x: x["price"], reverse=True)
+    fib_resistances = sorted(fib_resistances, key=lambda x: x["price"])
+
+    return {
+        "current_zone": current_zone,
+        "retracement_depth_pct": depth,
+        "nearest_level": {
+            "ratio": nearest[0],
+            "price": nearest[1],
+            "distance_pct": nearest_dist_pct,
+        },
+        "key_zone": key_zone,
+        "fib_supports": fib_supports,
+        "fib_resistances": fib_resistances,
+    }
