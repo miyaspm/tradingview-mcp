@@ -75,6 +75,14 @@ uv run tradingview-mcp
 
 Connect this server to **Telegram, WhatsApp, Discord** and 20+ messaging platforms using [OpenClaw](https://openclaw.ai) — a self-hosted AI gateway. **Tested & verified on Hetzner VPS (Ubuntu 24.04).**
 
+### How It Works
+
+> OpenClaw routes Telegram messages to an AI agent. The agent uses `trading.py` — a thin Python wrapper — to call `tradingview-mcp` functions and return formatted results. **No MCP protocol needed between OpenClaw and the server; it's a direct Python import.**
+
+```
+Telegram → OpenClaw agent (AI model) → trading.py (bash) → tradingview-mcp → Yahoo Finance
+```
+
 ### Quick Setup
 
 ```bash
@@ -82,10 +90,7 @@ Connect this server to **Telegram, WhatsApp, Discord** and 20+ messaging platfor
 curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.bashrc
 uv tool install tradingview-mcp-server
 
-# Verify installation (executable is named tradingview-mcp)
-uvx --from tradingview-mcp-server tradingview-mcp --help
-
-# 2. Configure OpenClaw (channels only — mcpServers not needed)
+# 2. Configure OpenClaw channels
 cat > ~/.openclaw/openclaw.json << 'EOF'
 {
   channels: {
@@ -96,47 +101,53 @@ cat > ~/.openclaw/openclaw.json << 'EOF'
 }
 EOF
 
-# 3. Configure model and gateway mode via CLI
+# 3. Configure gateway + agent
 openclaw config set gateway.mode local
-openclaw config set agents.defaults.model "openrouter/google/gemini-3-flash-preview"
 openclaw config set acp.defaultAgent main
 
-# 4. Set your OpenRouter API key
-openclaw configure --section model   # select OpenRouter, enter key
+# 4. Set your AI model (choose ONE option below)
+openclaw configure --section model
 
-# 5. Install the skill
-mkdir -p ~/.agents/skills/tradingview-mcp
+# 5. Install the skill + tool wrapper
+mkdir -p ~/.agents/skills/tradingview-mcp ~/.openclaw/tools
 curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/SKILL.md \
   -o ~/.agents/skills/tradingview-mcp/SKILL.md
-
-# 6. Create the trading tool wrapper
-mkdir -p ~/.openclaw/tools
 curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/trading.py \
-  -o ~/.openclaw/tools/trading.py
-chmod +x ~/.openclaw/tools/trading.py
+  -o ~/.openclaw/tools/trading.py && chmod +x ~/.openclaw/tools/trading.py
 
-# 7. Install and start the gateway
+# 6. Start the gateway
 openclaw gateway install
 systemctl --user start openclaw-gateway.service
-openclaw doctor
 ```
 
-### ⚠️ Key Configuration Notes
+### Choose Your AI Model
 
-| Setting | Correct Value | Common Mistake |
-|---------|--------------|----------------|
-| Model format | `openrouter/google/gemini-3-flash-preview` | `google/gemini-3-flash-preview` (wrong provider) |
-| MCP Servers | Not needed in `openclaw.json` | `mcpServers` key causes config error |
-| ACP agent | `openclaw config set acp.defaultAgent main` | Missing → "which agent?" error |
-| Gateway | `openclaw config set gateway.mode local` | Missing → gateway won't start |
+OpenRouter is **not required** — use whichever provider you have a key for:
 
-### Recommended Models (via OpenRouter)
+| Provider | Model ID for OpenClaw | Get Key |
+|----------|----------------------|---------|
+| **OpenRouter** (aggregator — access to all models) | `openrouter/google/gemini-3-flash-preview` | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| **Anthropic** (Claude direct) | `anthropic/claude-sonnet-4-5` | [console.anthropic.com](https://console.anthropic.com) |
+| **Google** (Gemini direct) | `google/gemini-2.5-flash` | [aistudio.google.com](https://aistudio.google.com) |
+| **OpenAI** (GPT direct) | `openai/gpt-4o-mini` | [platform.openai.com](https://platform.openai.com) |
 
-| Model | OpenRouter ID | Cost | Best For |
-|-------|--------------|------|---------|
-| Gemini 3 Flash | `openrouter/google/gemini-3-flash-preview` | Low | Fast, great tool use |
-| Claude Sonnet 4.6 | `openrouter/anthropic/claude-sonnet-4-6` | Medium | Best quality |
-| DeepSeek V3 | `openrouter/deepseek/deepseek-v3-2` | Very low | Budget option |
+```bash
+# Examples — set your chosen model:
+openclaw config set agents.defaults.model "openrouter/google/gemini-3-flash-preview"  # via OpenRouter
+openclaw config set agents.defaults.model "anthropic/claude-sonnet-4-5"               # Anthropic direct
+openclaw config set agents.defaults.model "google/gemini-2.5-flash"                   # Google direct
+```
+
+> ⚠️ **Important:** Prefix must match your provider. `google/...` needs a Google API key. `openrouter/...` needs an OpenRouter key.
+
+### ⚠️ Common Mistakes
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Unrecognized keys: mcpServers` | `mcpServers` not supported in this version | Remove from config, use bash wrapper |
+| `No API key for provider "google"` | Used `google/model` but only have OpenRouter key | Use `openrouter/google/model` instead |
+| `which agent?` loop | `acp.defaultAgent` not set | `openclaw config set acp.defaultAgent main` |
+| Gateway won't start | `gateway.mode` missing | `openclaw config set gateway.mode local` |
 
 ### Test Your Bot
 
@@ -150,6 +161,8 @@ compare all strategies for BTC-USD
 👉 **[Full OpenClaw Setup Guide →](OPENCLAW.md)**
 
 ---
+
+
 
 
 
