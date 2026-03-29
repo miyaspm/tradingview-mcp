@@ -71,7 +71,33 @@ uv run tradingview-mcp
 
 ---
 
-## 🤖 Multi-Agent Architecture
+## 📱 Use via Telegram, WhatsApp & More (OpenClaw)
+
+Connect this MCP server to **Telegram, WhatsApp, Discord, Slack**, and 20+ other platforms using [OpenClaw](https://openclaw.ai):
+
+```bash
+# 1. Install tradingview-mcp on your server
+uv tool install tradingview-mcp-server
+
+# 2. Add to ~/.openclaw/openclaw.json
+# mcpServers: { tradingview: { command: "uvx", args: ["tradingview-mcp-server"] } }
+
+# 3. Install the skill
+mkdir -p ~/.agents/skills/tradingview-mcp
+curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/SKILL.md \
+  -o ~/.agents/skills/tradingview-mcp/SKILL.md
+
+# 4. Restart gateway
+openclaw gateway restart
+```
+
+Then send your Telegram bot: `AAPL analiz et`, `BTC son 2 yıl en iyi strateji?`, `market_snapshot`
+
+👉 **[Full OpenClaw Setup Guide →](OPENCLAW.md)**
+
+---
+
+
 
 Unlike basic screeners, this framework deploys **specialized AI agents** that debate findings in real-time:
 
