@@ -1,26 +1,36 @@
 ---
 name: tradingview-mcp
 description: AI Trading Intelligence — live prices, 30+ technical indicators, backtesting (6 strategies), walk-forward overfitting detection, trade logs, equity curves, Reddit sentiment, news, and multi-market screener. Supports stocks, crypto, ETFs, indices, Turkish (BIST), and Egyptian (EGX) markets.
-metadata: { "openclaw": { "emoji": "📈", "homepage": "https://github.com/atilaahmettaner/tradingview-mcp", "requires": { "bins": ["uvx"], "config": ["mcpServers.tradingview"] } } }
+metadata: { "openclaw": { "emoji": "📈", "always": true, "homepage": "https://github.com/atilaahmettaner/tradingview-mcp" } }
 ---
 
 # TradingView MCP — AI Trading Intelligence
 
-You have access to the **tradingview-mcp** framework via MCP tools. Use these tools whenever users ask about:
+You have a trading intelligence tool available via bash. **NEVER use `sessions_spawn` or ask for an agent ID for trading tasks.** Run commands directly.
+
+Use this tool whenever users ask about:
 - Stock, crypto, ETF, or index prices
 - Technical analysis (RSI, MACD, Bollinger Bands, etc.)
 - Backtesting trading strategies
 - Market sentiment or news
 - Screening for trading opportunities
 
+## How to Run Trading Tools
+
+Execute via bash using the wrapper script:
+```bash
+python3 ~/.openclaw/tools/trading.py <command> [args]
+```
+
 ## Behavior Guidelines
 
-1. **Always combine signals.** Don't give a single indicator in isolation. For "should I buy X?" → combine price + technical signal + sentiment.
-2. **Qualify with timeframe and period.** If the user doesn't specify, default to `1y` period and `1d` interval.
-3. **Explain metrics.** When returning Sharpe ratio, Max Drawdown, Calmar, Profit Factor — briefly explain what they mean in plain language.
-4. **Add a disclaimer** on all backtesting results: "Past performance does not guarantee future results."
-5. **Be concise on Telegram/WhatsApp.** Summarize key metrics in a list, not a wall of JSON.
-6. **Detect language.** Reply in the same language the user writes in (Turkish, English, Arabic, etc.).
+1. **Run bash immediately.** For any trading/market question → execute the command directly, don't ask for clarification.
+2. **Always combine signals.** For "should I buy X?" → run price + backtest + sentiment together.
+3. **Qualify with timeframe.** Default to `1y` period and `1d` interval unless specified.
+4. **Explain metrics briefly.** Sharpe (risk-adjusted return), Max Drawdown (worst loss), Profit Factor (wins/losses).
+5. **Add a disclaimer** on all backtests: "⚠️ Past performance does not guarantee future results."
+6. **Be concise on Telegram.** Use emoji, bullet lists — no walls of JSON.
+7. **Detect language.** Reply in the same language the user writes in.
 
 ## Tool Quick Reference
 

@@ -73,25 +73,79 @@ uv run tradingview-mcp
 
 ## 📱 Use via Telegram, WhatsApp & More (OpenClaw)
 
-Connect this MCP server to **Telegram, WhatsApp, Discord, Slack**, and 20+ other platforms using [OpenClaw](https://openclaw.ai):
+Connect this server to **Telegram, WhatsApp, Discord** and 20+ messaging platforms using [OpenClaw](https://openclaw.ai) — a self-hosted AI gateway. **Tested & verified on Hetzner VPS (Ubuntu 24.04).**
+
+### Quick Setup
 
 ```bash
-# 1. Install tradingview-mcp on your server
+# 1. Install UV and tradingview-mcp
+curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.bashrc
 uv tool install tradingview-mcp-server
 
-# 2. Add to ~/.openclaw/openclaw.json
-# mcpServers: { tradingview: { command: "uvx", args: ["tradingview-mcp-server"] } }
+# Verify installation (executable is named tradingview-mcp)
+uvx --from tradingview-mcp-server tradingview-mcp --help
 
-# 3. Install the skill
+# 2. Configure OpenClaw (channels only — mcpServers not needed)
+cat > ~/.openclaw/openclaw.json << 'EOF'
+{
+  channels: {
+    telegram: {
+      botToken: "YOUR_BOT_TOKEN_HERE",
+    },
+  },
+}
+EOF
+
+# 3. Configure model and gateway mode via CLI
+openclaw config set gateway.mode local
+openclaw config set agents.defaults.model "openrouter/google/gemini-3-flash-preview"
+openclaw config set acp.defaultAgent main
+
+# 4. Set your OpenRouter API key
+openclaw configure --section model   # select OpenRouter, enter key
+
+# 5. Install the skill
 mkdir -p ~/.agents/skills/tradingview-mcp
 curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/SKILL.md \
   -o ~/.agents/skills/tradingview-mcp/SKILL.md
 
-# 4. Restart gateway
-openclaw gateway restart
+# 6. Create the trading tool wrapper
+mkdir -p ~/.openclaw/tools
+curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/trading.py \
+  -o ~/.openclaw/tools/trading.py
+chmod +x ~/.openclaw/tools/trading.py
+
+# 7. Install and start the gateway
+openclaw gateway install
+systemctl --user start openclaw-gateway.service
+openclaw doctor
 ```
 
-Then send your Telegram bot: `AAPL analiz et`, `BTC son 2 yıl en iyi strateji?`, `market_snapshot`
+### ⚠️ Key Configuration Notes
+
+| Setting | Correct Value | Common Mistake |
+|---------|--------------|----------------|
+| Model format | `openrouter/google/gemini-3-flash-preview` | `google/gemini-3-flash-preview` (wrong provider) |
+| MCP Servers | Not needed in `openclaw.json` | `mcpServers` key causes config error |
+| ACP agent | `openclaw config set acp.defaultAgent main` | Missing → "which agent?" error |
+| Gateway | `openclaw config set gateway.mode local` | Missing → gateway won't start |
+
+### Recommended Models (via OpenRouter)
+
+| Model | OpenRouter ID | Cost | Best For |
+|-------|--------------|------|---------|
+| Gemini 3 Flash | `openrouter/google/gemini-3-flash-preview` | Low | Fast, great tool use |
+| Claude Sonnet 4.6 | `openrouter/anthropic/claude-sonnet-4-6` | Medium | Best quality |
+| DeepSeek V3 | `openrouter/deepseek/deepseek-v3-2` | Very low | Budget option |
+
+### Test Your Bot
+
+Once running, send your Telegram bot:
+```
+market snapshot
+backtest RSI strategy for AAPL, 1 year
+compare all strategies for BTC-USD
+```
 
 👉 **[Full OpenClaw Setup Guide →](OPENCLAW.md)**
 
