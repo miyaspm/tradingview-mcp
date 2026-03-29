@@ -1,27 +1,16 @@
 """
-Backtesting Service for tradingview-mcp — v2 (Enhanced)
+Backtesting Service for tradingview-mcp — v3 (v0.7.0)
 
-Runs trading strategy simulations on Yahoo Finance historical OHLCV data.
 Pure Python — no pandas, no numpy, no external backtesting libraries.
 
-Supported strategies (6 total):
-  - rsi         : RSI oversold/overbought mean reversion
-  - bollinger   : Bollinger Band mean reversion
-  - macd        : MACD golden/death cross
-  - ema_cross   : EMA 20/50 golden/death cross
-  - supertrend  : Supertrend ATR-based trend following (🔥 most popular 2025)
-  - donchian    : Donchian Channel breakout (🔥 institutional favorite)
+Supported strategies (6):
+  rsi, bollinger, macd, ema_cross, supertrend, donchian
 
-Key metrics (institutional grade):
-  - Win rate, profit factor, max drawdown
-  - Sharpe ratio (risk-adjusted return)
-  - Calmar ratio (return / max drawdown)
-  - Expectancy (avg $ per trade)
-  - Transaction costs (commission + slippage)
-
-Usage:
-    result = run_backtest("BTC-USD", "supertrend", "1y", commission_pct=0.1)
-    compare = compare_strategies("AAPL", "2y")
+v0.7.0 additions:
+  - 1h (hourly) timeframe support
+  - Full trade log with per-trade detail
+  - Equity curve data points
+  - Walk-forward backtesting (overfitting detection)
 """
 from __future__ import annotations
 
@@ -33,19 +22,17 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from tradingview_mcp.core.services.indicators_calc import (
-    calc_rsi,
-    calc_bollinger,
-    calc_macd,
-    calc_ema,
-    calc_supertrend,
-    calc_donchian,
+    calc_rsi, calc_bollinger, calc_macd, calc_ema, calc_supertrend, calc_donchian,
 )
 
-_UA = "tradingview-mcp/0.5.0 backtest-bot"
-_YF_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+_UA       = "tradingview-mcp/0.7.0 backtest-bot"
+_YF_BASE  = "https://query1.finance.yahoo.com/v8/finance/chart"
 
 _VALID_PERIODS   = {"1mo", "3mo", "6mo", "1y", "2y"}
-_VALID_INTERVALS = {"1d"}
+_VALID_INTERVALS = {"1d", "1h"}
+
+# Annualization factor for Sharpe ratio
+_ANNUALIZATION = {"1d": 252, "1h": 252 * 6}
 
 _STRATEGY_LABELS = {
     "rsi":        "RSI Oversold/Overbought",
@@ -60,16 +47,12 @@ _STRATEGY_LABELS = {
 # ─── Data Fetching ────────────────────────────────────────────────────────────
 
 def _fetch_ohlcv(symbol: str, period: str, interval: str = "1d") -> list[dict]:
-    """
-    Fetch historical OHLCV from Yahoo Finance.
-    Direct connection first; proxy fallback if needed.
-    """
     url = f"{_YF_BASE}/{symbol}?interval={interval}&range={period}"
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
 
     data = None
     try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:
         pass
@@ -78,7 +61,7 @@ def _fetch_ohlcv(symbol: str, period: str, interval: str = "1d") -> list[dict]:
         try:
             from tradingview_mcp.core.services.proxy_manager import build_opener_with_proxy
             opener = build_opener_with_proxy(_UA)
-            with opener.open(req, timeout=15) as resp:
+            with opener.open(url, timeout=18) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             raise RuntimeError(f"Both direct and proxy connections failed: {e}")
@@ -86,6 +69,7 @@ def _fetch_ohlcv(symbol: str, period: str, interval: str = "1d") -> list[dict]:
     result     = data["chart"]["result"][0]
     timestamps = result["timestamp"]
     q          = result["indicators"]["quote"][0]
+    date_fmt   = "%Y-%m-%d %H:%M" if interval == "1h" else "%Y-%m-%d"
 
     candles = []
     for i, ts in enumerate(timestamps):
@@ -93,7 +77,7 @@ def _fetch_ohlcv(symbol: str, period: str, interval: str = "1d") -> list[dict]:
         if None in (o, h, l, c):
             continue
         candles.append({
-            "date":   datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"),
+            "date":   datetime.fromtimestamp(ts, tz=timezone.utc).strftime(date_fmt),
             "open":   round(o, 4),
             "high":   round(h, 4),
             "low":    round(l, 4),
@@ -173,60 +157,39 @@ def _run_ema_cross(candles, fast_period=20, slow_period=50, **_):
 
 
 def _run_supertrend(candles, atr_period=10, multiplier=3.0, **_):
-    """
-    Supertrend strategy — buy on bullish flip, sell on bearish flip.
-    One of the most popular trend-following strategies in 2025.
-    """
     highs  = [c["high"]  for c in candles]
     lows   = [c["low"]   for c in candles]
     closes = [c["close"] for c in candles]
     st     = calc_supertrend(highs, lows, closes, atr_period, multiplier)
-
     trades, position = [], None
     for i in range(1, len(candles)):
         d, dp = st["direction"][i], st["direction"][i - 1]
         if d is None or dp is None:
             continue
         price, date = candles[i]["close"], candles[i]["date"]
-
-        # Bullish flip: bearish → bullish
         if position is None and dp == -1 and d == 1:
             position = {"entry_date": date, "entry_price": price, "strategy": "supertrend"}
-
-        # Bearish flip: bullish → bearish
         elif position is not None and dp == 1 and d == -1:
             trades.append({**position, "exit_date": date, "exit_price": price})
             position = None
-
     return trades
 
 
 def _run_donchian(candles, period=20, **_):
-    """
-    Donchian Channel breakout — buy new highs, sell new lows.
-    Classic breakout strategy used by the famous Turtle Traders.
-    """
     highs  = [c["high"] for c in candles]
     lows   = [c["low"]  for c in candles]
     dc     = calc_donchian(highs, lows, period)
     trades, position = [], None
-
     for i in range(1, len(candles)):
         if dc["upper"][i] is None:
             continue
         price, date = candles[i]["close"], candles[i]["date"]
         prev_high   = highs[i - 1]
-        prev_low    = lows[i - 1]
-
-        # Breakout above upper band → BUY
-        if position is None and prev_high > dc["upper"][i - 1] if dc["upper"][i - 1] else False:
+        if position is None and dc["upper"][i - 1] is not None and prev_high > dc["upper"][i - 1]:
             position = {"entry_date": date, "entry_price": price, "strategy": "donchian"}
-
-        # Break below lower band → SELL
         elif position is not None and dc["lower"][i] is not None and price < dc["lower"][i]:
             trades.append({**position, "exit_date": date, "exit_price": price})
             position = None
-
     return trades
 
 
@@ -240,11 +203,10 @@ _STRATEGY_MAP = {
 }
 
 
-# ─── Transaction Cost Application ─────────────────────────────────────────────
+# ─── Transaction Costs ────────────────────────────────────────────────────────
 
 def _apply_costs(trades: list[dict], commission_pct: float, slippage_pct: float) -> list[dict]:
-    """Apply realistic transaction costs: commission + slippage per round-trip."""
-    total_cost_pct = (commission_pct + slippage_pct) * 2  # entry + exit
+    total_cost_pct = (commission_pct + slippage_pct) * 2
     result = []
     for t in trades:
         gross = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
@@ -254,9 +216,59 @@ def _apply_costs(trades: list[dict], commission_pct: float, slippage_pct: float)
     return result
 
 
+# ─── Trade Log & Equity Curve ─────────────────────────────────────────────────
+
+def _build_trade_log(trades: list[dict], initial_capital: float) -> list[dict]:
+    """Full per-trade log with holding days, running capital, cumulative return."""
+    capital = initial_capital
+    log = []
+    for i, t in enumerate(trades):
+        capital_before = capital
+        capital *= (1 + t["return_pct"] / 100)
+        cum_return = round((capital - initial_capital) / initial_capital * 100, 2)
+        try:
+            entry_dt     = datetime.fromisoformat(t["entry_date"].replace(" ", "T"))
+            exit_dt      = datetime.fromisoformat(t["exit_date"].replace(" ", "T"))
+            holding_days = max(1, (exit_dt - entry_dt).days)
+        except Exception:
+            holding_days = None
+        log.append({
+            "trade_no":              i + 1,
+            "entry_date":            t["entry_date"],
+            "entry_price":           t["entry_price"],
+            "exit_date":             t["exit_date"],
+            "exit_price":            t["exit_price"],
+            "holding_days":          holding_days,
+            "return_pct":            t["return_pct"],
+            "gross_return_pct":      t.get("gross_return_pct", t["return_pct"]),
+            "cost_pct":              t.get("cost_pct", 0),
+            "capital_before":        round(capital_before, 2),
+            "capital_after":         round(capital, 2),
+            "cumulative_return_pct": cum_return,
+        })
+    return log
+
+
+def _build_equity_curve(trades: list[dict], initial_capital: float) -> list[dict]:
+    """Equity curve: capital + drawdown at each trade exit."""
+    capital = initial_capital
+    peak    = capital
+    curve   = [{"date": "start", "equity": round(capital, 2), "drawdown_pct": 0.0}]
+    for t in trades:
+        capital *= (1 + t["return_pct"] / 100)
+        peak     = max(peak, capital)
+        dd       = round((peak - capital) / peak * 100, 2)
+        curve.append({
+            "date":         t["exit_date"],
+            "equity":       round(capital, 2),
+            "drawdown_pct": -dd,
+        })
+    return curve
+
+
 # ─── Metrics ──────────────────────────────────────────────────────────────────
 
-def _calc_metrics(trades: list[dict], initial_capital: float) -> dict:
+def _calc_metrics(trades: list[dict], initial_capital: float, interval: str = "1d") -> dict:
     empty = {
         "total_trades": 0, "win_rate_pct": 0, "winning_trades": 0, "losing_trades": 0,
         "total_return_pct": 0, "final_capital": initial_capital,
@@ -270,7 +282,6 @@ def _calc_metrics(trades: list[dict], initial_capital: float) -> dict:
     winners = [t for t in trades if t["return_pct"] > 0]
     losers  = [t for t in trades if t["return_pct"] <= 0]
 
-    # Compound capital
     capital = initial_capital
     peak    = capital
     max_dd  = 0.0
@@ -280,36 +291,29 @@ def _calc_metrics(trades: list[dict], initial_capital: float) -> dict:
         capital *= (1 + r)
         returns.append(r)
         peak   = max(peak, capital)
-        dd     = (peak - capital) / peak * 100
-        max_dd = max(max_dd, dd)
+        max_dd = max(max_dd, (peak - capital) / peak * 100)
 
-    total_return = (capital - initial_capital) / initial_capital * 100
-    avg_gain  = sum(t["return_pct"] for t in winners) / len(winners) if winners else 0
-    avg_loss  = sum(t["return_pct"] for t in losers)  / len(losers)  if losers  else 0
-    gp = sum(t["return_pct"] for t in winners)
-    gl = abs(sum(t["return_pct"] for t in losers))
+    total_return  = (capital - initial_capital) / initial_capital * 100
+    avg_gain      = sum(t["return_pct"] for t in winners) / len(winners) if winners else 0
+    avg_loss      = sum(t["return_pct"] for t in losers)  / len(losers)  if losers  else 0
+    gp            = sum(t["return_pct"] for t in winners)
+    gl            = abs(sum(t["return_pct"] for t in losers))
     profit_factor = round(gp / gl, 2) if gl > 0 else float("inf")
 
-    # Sharpe Ratio (annualized, assuming 252 trading days, risk-free = 4%)
+    ann  = _ANNUALIZATION.get(interval, 252)
     sharpe = 0.0
     if len(returns) > 1:
         mean_r = statistics.mean(returns)
         std_r  = statistics.stdev(returns)
-        rf_daily = 0.04 / 252
-        sharpe = round((mean_r - rf_daily) / std_r * math.sqrt(252), 2) if std_r > 0 else 0
+        if std_r > 0:
+            sharpe = round((mean_r - 0.04 / ann) / std_r * math.sqrt(ann), 2)
 
-    # Calmar Ratio = annualized return / max drawdown
-    calmar = 0.0
-    if max_dd > 0:
-        calmar = round(total_return / max_dd, 2)
+    calmar = round(total_return / max_dd, 2) if max_dd > 0 else 0.0
 
-    # Expectancy = (WR × avg_gain) - (LR × avg_loss)
-    wr = len(winners) / len(trades)
-    lr = 1 - wr
-    expectancy = round(wr * avg_gain + lr * avg_loss, 2)
-
-    best  = max(trades, key=lambda t: t["return_pct"])
-    worst = min(trades, key=lambda t: t["return_pct"])
+    wr         = len(winners) / len(trades)
+    expectancy = round(wr * avg_gain + (1 - wr) * avg_loss, 2)
+    best       = max(trades, key=lambda t: t["return_pct"])
+    worst      = min(trades, key=lambda t: t["return_pct"])
 
     return {
         "total_trades":     len(trades),
@@ -336,7 +340,7 @@ def _buy_and_hold_return(candles: list[dict]) -> float:
     return round((candles[-1]["close"] - candles[0]["close"]) / candles[0]["close"] * 100, 2)
 
 
-# ─── Public API ───────────────────────────────────────────────────────────────
+# ─── Public API: run_backtest ─────────────────────────────────────────────────
 
 def run_backtest(
     symbol: str,
@@ -345,63 +349,67 @@ def run_backtest(
     initial_capital: float = 10_000.0,
     commission_pct: float = 0.1,
     slippage_pct: float = 0.05,
+    interval: str = "1d",
+    include_trade_log: bool = False,
+    include_equity_curve: bool = False,
 ) -> dict:
-    """
-    Run a backtest for the given symbol and strategy.
-
-    Args:
-        symbol:          Yahoo Finance symbol (AAPL, BTC-USD, ^GSPC, THYAO.IS…)
-        strategy:        rsi | bollinger | macd | ema_cross | supertrend | donchian
-        period:          1mo | 3mo | 6mo | 1y | 2y
-        initial_capital: Starting capital in USD
-        commission_pct:  Per-trade commission % (default 0.1% = typical broker)
-        slippage_pct:    Per-trade slippage % (default 0.05%)
-
-    Returns:
-        Full institutional-grade performance report.
-    """
     strategy = strategy.lower().strip()
     period   = period.lower().strip()
+    interval = interval.lower().strip()
 
     if strategy not in _STRATEGY_MAP:
         return {"error": f"Unknown strategy '{strategy}'. Choose: {', '.join(_STRATEGY_MAP)}"}
     if period not in _VALID_PERIODS:
         return {"error": f"Invalid period '{period}'. Choose: {', '.join(_VALID_PERIODS)}"}
+    if interval not in _VALID_INTERVALS:
+        return {"error": f"Invalid interval '{interval}'. Choose: 1d or 1h"}
 
     try:
-        candles = _fetch_ohlcv(symbol, period, "1d")
+        candles = _fetch_ohlcv(symbol, period, interval)
     except Exception as e:
         return {"error": f"Failed to fetch data for '{symbol}': {e}"}
 
-    if len(candles) < 30:
-        return {"error": f"Not enough data ({len(candles)} candles). Try a longer period."}
+    min_bars = 30 if interval == "1d" else 100
+    if len(candles) < min_bars:
+        return {"error": f"Not enough data ({len(candles)} bars). Try a longer period."}
 
     raw_trades = _STRATEGY_MAP[strategy](candles)
     trades     = _apply_costs(raw_trades, commission_pct, slippage_pct)
-    metrics    = _calc_metrics(trades, initial_capital)
+    metrics    = _calc_metrics(trades, initial_capital, interval)
     bnh        = _buy_and_hold_return(candles)
 
-    return {
-        "symbol":              symbol.upper(),
-        "strategy":            strategy,
-        "strategy_label":      _STRATEGY_LABELS[strategy],
-        "period":              period,
-        "timeframe":           "Daily (1d)",
-        "candles_analyzed":    len(candles),
-        "date_from":           candles[0]["date"],
-        "date_to":             candles[-1]["date"],
-        "initial_capital":     round(initial_capital, 2),
-        "commission_pct":      commission_pct,
-        "slippage_pct":        slippage_pct,
+    result = {
+        "symbol":                  symbol.upper(),
+        "strategy":                strategy,
+        "strategy_label":          _STRATEGY_LABELS[strategy],
+        "period":                  period,
+        "interval":                interval,
+        "timeframe":               "Hourly (1h)" if interval == "1h" else "Daily (1d)",
+        "candles_analyzed":        len(candles),
+        "date_from":               candles[0]["date"],
+        "date_to":                 candles[-1]["date"],
+        "initial_capital":         round(initial_capital, 2),
+        "commission_pct":          commission_pct,
+        "slippage_pct":            slippage_pct,
         **metrics,
         "buy_and_hold_return_pct": bnh,
-        "vs_buy_and_hold_pct": round(metrics["total_return_pct"] - bnh, 2),
-        "trade_log":           trades[-10:],
-        "data_source":         "Yahoo Finance",
-        "disclaimer":          "Past performance does not guarantee future results. For educational use only.",
-        "timestamp":           datetime.now(timezone.utc).isoformat(),
+        "vs_buy_and_hold_pct":     round(metrics["total_return_pct"] - bnh, 2),
+        "recent_trades":           trades[-5:],
+        "data_source":             "Yahoo Finance",
+        "disclaimer":              "Past performance does not guarantee future results. For educational use only.",
+        "timestamp":               datetime.now(timezone.utc).isoformat(),
     }
 
+    if include_trade_log:
+        result["trade_log"] = _build_trade_log(trades, initial_capital)
+
+    if include_equity_curve:
+        result["equity_curve"] = _build_equity_curve(trades, initial_capital)
+
+    return result
+
+
+# ─── Public API: compare_strategies ──────────────────────────────────────────
 
 def compare_strategies(
     symbol: str,
@@ -409,24 +417,27 @@ def compare_strategies(
     initial_capital: float = 10_000.0,
     commission_pct: float = 0.1,
     slippage_pct: float = 0.05,
+    interval: str = "1d",
 ) -> dict:
-    """
-    Run all 6 strategies on the same symbol with a single OHLCV fetch.
-    Returns a ranked leaderboard with Sharpe ratio, drawdown, and profit factor.
-    """
+    """Run all 6 strategies on one symbol. Supports 1d and 1h intervals."""
+    interval = interval.lower().strip()
+    if interval not in _VALID_INTERVALS:
+        return {"error": f"Invalid interval '{interval}'. Choose: 1d or 1h"}
+
     try:
-        candles = _fetch_ohlcv(symbol, period, "1d")
+        candles = _fetch_ohlcv(symbol, period, interval)
     except Exception as e:
         return {"error": f"Failed to fetch data for '{symbol}': {e}"}
 
-    if len(candles) < 30:
-        return {"error": f"Not enough data ({len(candles)} candles)."}
+    min_bars = 30 if interval == "1d" else 100
+    if len(candles) < min_bars:
+        return {"error": f"Not enough data ({len(candles)} bars)."}
 
     results = []
     for strat, fn in _STRATEGY_MAP.items():
         raw    = fn(candles)
         trades = _apply_costs(raw, commission_pct, slippage_pct)
-        m      = _calc_metrics(trades, initial_capital)
+        m      = _calc_metrics(trades, initial_capital, interval)
         results.append({
             "strategy":         strat,
             "strategy_label":   _STRATEGY_LABELS[strat],
@@ -449,7 +460,8 @@ def compare_strategies(
     return {
         "symbol":                  symbol.upper(),
         "period":                  period,
-        "timeframe":               "Daily (1d)",
+        "interval":                interval,
+        "timeframe":               "Hourly (1h)" if interval == "1h" else "Daily (1d)",
         "candles_analyzed":        len(candles),
         "date_from":               candles[0]["date"],
         "date_to":                 candles[-1]["date"],
@@ -460,5 +472,156 @@ def compare_strategies(
         "winner":                  results[0]["strategy"] if results else None,
         "ranking":                 results,
         "disclaimer":              "Past performance does not guarantee future results.",
+        "timestamp":               datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ─── Public API: walk_forward_backtest ────────────────────────────────────────
+
+def walk_forward_backtest(
+    symbol: str,
+    strategy: str,
+    period: str = "2y",
+    initial_capital: float = 10_000.0,
+    commission_pct: float = 0.1,
+    slippage_pct: float = 0.05,
+    n_splits: int = 3,
+    train_ratio: float = 0.7,
+    interval: str = "1d",
+) -> dict:
+    """
+    Walk-forward backtesting — detect overfitting via train/test splits.
+
+    Splits full history into n_splits folds. Each fold:
+      - Train (70%): in-sample strategy simulation
+      - Test  (30%): out-of-sample forward validation
+
+    Robustness score (test_return / train_return):
+      >= 0.8  → ROBUST    (no overfitting)
+      >= 0.5  → MODERATE  (some degradation)
+      >= 0.2  → WEAK      (likely overfitted)
+      < 0.2   → OVERFITTED (do not trade live)
+    """
+    strategy = strategy.lower().strip()
+    period   = period.lower().strip()
+    interval = interval.lower().strip()
+
+    if strategy not in _STRATEGY_MAP:
+        return {"error": f"Unknown strategy '{strategy}'. Choose: {', '.join(_STRATEGY_MAP)}"}
+    if period not in _VALID_PERIODS:
+        return {"error": f"Invalid period '{period}'. Choose: {', '.join(_VALID_PERIODS)}"}
+    if interval not in _VALID_INTERVALS:
+        return {"error": f"Invalid interval '{interval}'. Choose: 1d or 1h"}
+    if not (2 <= n_splits <= 10):
+        return {"error": "n_splits must be between 2 and 10"}
+    if not (0.5 <= train_ratio <= 0.9):
+        return {"error": "train_ratio must be between 0.5 and 0.9"}
+
+    try:
+        candles = _fetch_ohlcv(symbol, period, interval)
+    except Exception as e:
+        return {"error": f"Failed to fetch data for '{symbol}': {e}"}
+
+    min_bars = max(60, n_splits * 20)
+    if len(candles) < min_bars:
+        return {"error": f"Not enough data ({len(candles)} bars) for {n_splits} splits. Try longer period."}
+
+    fn        = _STRATEGY_MAP[strategy]
+    fold_size = len(candles) // n_splits
+
+    folds: list[dict]   = []
+    all_test_trades: list[dict] = []
+
+    for fold_i in range(n_splits):
+        start  = fold_i * fold_size
+        end    = (start + fold_size) if fold_i < n_splits - 1 else len(candles)
+        window = candles[start:end]
+        split  = int(len(window) * train_ratio)
+
+        train_c = window[:split]
+        test_c  = window[split:]
+
+        if len(train_c) < 20 or len(test_c) < 5:
+            continue
+
+        train_t = _apply_costs(fn(train_c), commission_pct, slippage_pct)
+        test_t  = _apply_costs(fn(test_c),  commission_pct, slippage_pct)
+        train_m = _calc_metrics(train_t, initial_capital, interval)
+        test_m  = _calc_metrics(test_t,  initial_capital, interval)
+
+        all_test_trades.extend(test_t)
+
+        tr, te = train_m["total_return_pct"], test_m["total_return_pct"]
+        if tr == 0:
+            fold_rob = 1.0 if te == 0 else 0.0
+        elif tr < 0 and te < 0:
+            fold_rob = round(min(te / tr, 2.0), 2)
+        elif tr < 0:
+            fold_rob = 0.0
+        else:
+            fold_rob = round(max(min(te / tr, 2.0), -1.0), 2)
+
+        folds.append({
+            "fold":                  fold_i + 1,
+            "train_from":            train_c[0]["date"],
+            "train_to":              train_c[-1]["date"],
+            "train_candles":         len(train_c),
+            "train_return_pct":      train_m["total_return_pct"],
+            "train_trades":          train_m["total_trades"],
+            "train_sharpe":          train_m["sharpe_ratio"],
+            "test_from":             test_c[0]["date"],
+            "test_to":               test_c[-1]["date"],
+            "test_candles":          len(test_c),
+            "test_return_pct":       test_m["total_return_pct"],
+            "test_trades":           test_m["total_trades"],
+            "test_sharpe":           test_m["sharpe_ratio"],
+            "fold_robustness_score": fold_rob,
+        })
+
+    if not folds:
+        return {"error": "Could not generate any valid folds. Try a longer period or fewer splits."}
+
+    avg_train  = round(statistics.mean(f["train_return_pct"] for f in folds), 2)
+    avg_test   = round(statistics.mean(f["test_return_pct"]  for f in folds), 2)
+    avg_robust = round(statistics.mean(f["fold_robustness_score"] for f in folds), 2)
+    oos_m      = _calc_metrics(all_test_trades, initial_capital, interval)
+
+    if avg_robust >= 0.8:
+        verdict = "ROBUST — strategy performs consistently in-sample and out-of-sample"
+    elif avg_robust >= 0.5:
+        verdict = "MODERATE — some degradation out-of-sample, use with caution"
+    elif avg_robust >= 0.2:
+        verdict = "WEAK — significant out-of-sample degradation, likely overfitted"
+    else:
+        verdict = "OVERFITTED — strategy fails out-of-sample, do not trade live"
+
+    return {
+        "symbol":                  symbol.upper(),
+        "strategy":                strategy,
+        "strategy_label":          _STRATEGY_LABELS[strategy],
+        "period":                  period,
+        "interval":                interval,
+        "timeframe":               "Hourly (1h)" if interval == "1h" else "Daily (1d)",
+        "total_candles":           len(candles),
+        "n_splits":                n_splits,
+        "train_ratio":             train_ratio,
+        "date_from":               candles[0]["date"],
+        "date_to":                 candles[-1]["date"],
+        "avg_train_return_pct":    avg_train,
+        "avg_test_return_pct":     avg_test,
+        "robustness_score":        avg_robust,
+        "verdict":                 verdict,
+        "oos_total_trades":        oos_m["total_trades"],
+        "oos_win_rate_pct":        oos_m["win_rate_pct"],
+        "oos_sharpe_ratio":        oos_m["sharpe_ratio"],
+        "oos_max_drawdown_pct":    oos_m["max_drawdown_pct"],
+        "oos_total_return_pct":    oos_m["total_return_pct"],
+        "buy_and_hold_return_pct": _buy_and_hold_return(candles),
+        "folds":                   folds,
+        "initial_capital":         round(initial_capital, 2),
+        "commission_pct":          commission_pct,
+        "slippage_pct":            slippage_pct,
+        "data_source":             "Yahoo Finance",
+        "disclaimer":              "Past performance does not guarantee future results. For educational use only.",
         "timestamp":               datetime.now(timezone.utc).isoformat(),
     }

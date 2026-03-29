@@ -17,7 +17,7 @@ from tradingview_mcp.core.utils.validators import sanitize_timeframe, sanitize_e
 from tradingview_mcp.core.services.sentiment_service import analyze_sentiment
 from tradingview_mcp.core.services.news_service import fetch_news_summary
 from tradingview_mcp.core.services.yahoo_finance_service import get_price, get_prices_bulk, get_market_snapshot
-from tradingview_mcp.core.services.backtest_service import run_backtest, compare_strategies as _compare_strategies
+from tradingview_mcp.core.services.backtest_service import run_backtest, compare_strategies as _compare_strategies, walk_forward_backtest
 
 try:
     from tradingview_ta import TA_Handler, get_multiple_analysis
@@ -2971,30 +2971,40 @@ def backtest_strategy(
     initial_capital: float = 10000.0,
     commission_pct: float = 0.1,
     slippage_pct: float = 0.05,
+    interval: str = "1d",
+    include_trade_log: bool = False,
+    include_equity_curve: bool = False,
 ) -> dict:
-    """Backtest a trading strategy on historical daily data with institutional-grade metrics.
+    """Backtest a trading strategy on historical data with institutional-grade metrics.
 
     Args:
-        symbol:          Yahoo Finance symbol — stocks (AAPL, TSLA, NVDA), crypto (BTC-USD, ETH-USD),
-                         ETFs (SPY, QQQ), indices (^GSPC, ^IXIC), Turkish (THYAO.IS)
-        strategy:        Trading strategy to test:
-                           'rsi'        — Buy oversold (RSI<30), Sell overbought (RSI>70)
-                           'bollinger'  — Buy at lower Bollinger Band, Sell at middle band
-                           'macd'       — Buy on MACD golden cross, Sell on death cross
-                           'ema_cross'  — Buy EMA20>EMA50 crossover, Sell on reversal
-                           'supertrend' — Buy on bullish Supertrend flip (🔥 trending 2025)
-                           'donchian'   — Buy Donchian Channel breakout (Turtle Trader style)
-        period:          Historical data period: '1mo', '3mo', '6mo', '1y', '2y'
-        initial_capital: Starting capital in USD (default: $10,000)
-        commission_pct:  Per-trade commission % (default: 0.1% — typical broker fee)
-        slippage_pct:    Per-trade slippage % (default: 0.05%)
+        symbol:               Yahoo Finance symbol — stocks (AAPL, TSLA, NVDA), crypto (BTC-USD, ETH-USD),
+                              ETFs (SPY, QQQ), indices (^GSPC, ^IXIC), Turkish (THYAO.IS)
+        strategy:             Trading strategy to test:
+                                'rsi'        — Buy oversold (RSI<30), Sell overbought (RSI>70)
+                                'bollinger'  — Buy at lower Bollinger Band, Sell at middle band
+                                'macd'       — Buy on MACD golden cross, Sell on death cross
+                                'ema_cross'  — Buy EMA20>EMA50 crossover, Sell on reversal
+                                'supertrend' — Buy on bullish Supertrend flip
+                                'donchian'   — Buy Donchian Channel breakout (Turtle Trader style)
+        period:               Historical data period: '1mo', '3mo', '6mo', '1y', '2y'
+        initial_capital:      Starting capital in USD (default: $10,000)
+        commission_pct:       Per-trade commission % (default: 0.1%)
+        slippage_pct:         Per-trade slippage % (default: 0.05%)
+        interval:             Timeframe: '1d' (daily, default) or '1h' (hourly)
+        include_trade_log:    Include full per-trade log with entry/exit/P&L detail (default: False)
+        include_equity_curve: Include equity curve data points for charting (default: False)
 
     Returns:
         Institutional-grade backtest report: win rate, total return, Sharpe ratio,
         Calmar ratio, max drawdown, profit factor, expectancy, best/worst trade,
-        vs buy-and-hold benchmark. Includes transaction cost simulation.
+        vs buy-and-hold benchmark. Optionally includes full trade log and equity curve.
     """
-    return run_backtest(symbol, strategy, period, initial_capital, commission_pct, slippage_pct)
+    return run_backtest(
+        symbol, strategy, period, initial_capital,
+        commission_pct, slippage_pct, interval,
+        include_trade_log, include_equity_curve,
+    )
 
 
 @mcp.tool()
@@ -3002,19 +3012,67 @@ def compare_strategies(
     symbol: str,
     period: str = "1y",
     initial_capital: float = 10000.0,
+    interval: str = "1d",
 ) -> dict:
-    """Run all 4 strategies (RSI, Bollinger, MACD, EMA Cross) on the same symbol
-    and return a ranked performance leaderboard.
+    """Run all 6 strategies (RSI, Bollinger, MACD, EMA Cross, Supertrend, Donchian) on the
+    same symbol and return a ranked performance leaderboard.
 
     Args:
         symbol:          Yahoo Finance symbol (AAPL, BTC-USD, SPY…)
         period:          Historical data period: '1mo', '3mo', '6mo', '1y', '2y'
         initial_capital: Starting capital in USD (default: $10,000)
+        interval:        Timeframe: '1d' (daily, default) or '1h' (hourly)
 
     Returns:
-        Ranked leaderboard of all 4 strategies vs buy-and-hold benchmark.
+        Ranked leaderboard of all 6 strategies vs buy-and-hold benchmark.
     """
-    return _compare_strategies(symbol, period, initial_capital)
+    return _compare_strategies(symbol, period, initial_capital, interval=interval)
+
+
+@mcp.tool()
+def walk_forward_backtest_strategy(
+    symbol: str,
+    strategy: str,
+    period: str = "2y",
+    initial_capital: float = 10000.0,
+    commission_pct: float = 0.1,
+    slippage_pct: float = 0.05,
+    n_splits: int = 3,
+    train_ratio: float = 0.7,
+    interval: str = "1d",
+) -> dict:
+    """Walk-forward backtest to detect overfitting — validates strategy on unseen data.
+
+    Splits historical data into n_splits folds. Each fold:
+      - Train (70% by default): strategy runs in-sample
+      - Test  (30% by default): strategy runs on unseen forward data
+
+    Robustness score (out-of-sample / in-sample performance ratio):
+      >= 0.8 → ROBUST    — no overfitting, safe to consider for live trading
+      >= 0.5 → MODERATE  — some degradation out-of-sample, use with caution
+      >= 0.2 → WEAK      — significant degradation, likely curve-fitted
+      <  0.2 → OVERFITTED — fails on unseen data, do not trade live
+
+    Args:
+        symbol:          Yahoo Finance symbol (AAPL, BTC-USD, SPY…)
+        strategy:        rsi | bollinger | macd | ema_cross | supertrend | donchian
+        period:          Historical data period: '1mo', '3mo', '6mo', '1y', '2y'
+                         (recommend '2y' for meaningful walk-forward splits)
+        initial_capital: Starting capital per fold in USD (default: $10,000)
+        commission_pct:  Per-trade commission % (default: 0.1%)
+        slippage_pct:    Per-trade slippage % (default: 0.05%)
+        n_splits:        Number of walk-forward folds (default: 3, max: 10)
+        train_ratio:     Fraction of each fold used for training (default: 0.7)
+        interval:        Timeframe: '1d' (daily, default) or '1h' (hourly)
+
+    Returns:
+        Per-fold train/test metrics, aggregate robustness score, verdict,
+        and combined out-of-sample performance.
+    """
+    return walk_forward_backtest(
+        symbol, strategy, period, initial_capital,
+        commission_pct, slippage_pct, n_splits, train_ratio, interval,
+    )
 
 
 @mcp.tool()
