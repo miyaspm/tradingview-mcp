@@ -27,40 +27,40 @@ You have access to the **tradingview-mcp** framework via MCP tools. Use these to
 ### Prices & Market
 | Intent | Tool |
 |--------|------|
-| "AAPL fiyatı?" | `yahoo_price(symbol="AAPL")` |
-| "BTC ve ETH fiyatları" | `get_prices_bulk(symbols=["BTC-USD","ETH-USD"])` |
-| "Piyasalar nasıl bugün?" | `market_snapshot()` |
+| "What is AAPL's price?" | `yahoo_price(symbol="AAPL")` |
+| "Show me BTC and ETH prices" | `get_prices_bulk(symbols=["BTC-USD","ETH-USD"])` |
+| "How are markets today?" | `market_snapshot()` |
 
 ### Technical Analysis
 | Intent | Tool |
 |--------|------|
-| "AAPL teknik analiz" | `technical_analysis(symbol="AAPL", exchange="NASDAQ", screener="america", interval="1h")` |
-| "BTC RSI değeri" | `calculate_rsi(symbol="BTC-USD", period="14")` |
-| "Supertrend sinyali?" | `calculate_supertrend(symbol="AAPL")` |
+| "Analyze AAPL technically" | `technical_analysis(symbol="AAPL", exchange="NASDAQ", screener="america", interval="1h")` |
+| "What is the RSI for BTC?" | `calculate_rsi(symbol="BTC-USD", period="14")` |
+| "Supertrend signal for AAPL?" | `calculate_supertrend(symbol="AAPL")` |
 
 ### Backtesting
 | Intent | Tool |
 |--------|------|
-| "RSI stratejisi 1 yıl" | `backtest_strategy(symbol="AAPL", strategy="rsi", period="1y")` |
-| "Trade log istiyorum" | `backtest_strategy(symbol="BTC-USD", strategy="supertrend", period="1y", include_trade_log=True)` |
-| "Saatlik backtest" | `backtest_strategy(symbol="AAPL", strategy="bollinger", period="3mo", interval="1h")` |
-| "En iyi strateji?" | `compare_strategies(symbol="BTC-USD", period="2y")` |
-| "Overfit mi bu strateji?" | `walk_forward_backtest_strategy(symbol="AAPL", strategy="rsi", period="2y", n_splits=3)` |
+| "Backtest RSI strategy for 1 year" | `backtest_strategy(symbol="AAPL", strategy="rsi", period="1y")` |
+| "Show me the full trade log" | `backtest_strategy(symbol="BTC-USD", strategy="supertrend", period="1y", include_trade_log=True)` |
+| "Run hourly backtest" | `backtest_strategy(symbol="AAPL", strategy="bollinger", period="3mo", interval="1h")` |
+| "Which strategy is best?" | `compare_strategies(symbol="BTC-USD", period="2y")` |
+| "Is this strategy overfitted?" | `walk_forward_backtest_strategy(symbol="AAPL", strategy="rsi", period="2y", n_splits=3)` |
 
 ### Sentiment & News
 | Intent | Tool |
 |--------|------|
-| "Reddit'te BTC hakkında ne deniyor?" | `analyze_sentiment(symbol="BTC")` |
-| "Son haberler AAPL" | `fetch_news_summary(symbol="AAPL")` |
-| "Teknik + sentiment birleştir" | `analyze_confluence(symbol="AAPL", exchange="NASDAQ")` |
+| "What is Reddit saying about BTC?" | `analyze_sentiment(symbol="BTC")` |
+| "Latest news on AAPL" | `fetch_news_summary(symbol="AAPL")` |
+| "Combine technical + sentiment" | `analyze_confluence(symbol="AAPL", exchange="NASDAQ")` |
 
 ### Screener
 | Intent | Tool |
 |--------|------|
-| "Güçlü hisseler" | `screener_bullish(exchange="NASDAQ")` |
-| "Oversold hisseler" | `screener_oversold(exchange="NASDAQ")` |
-| "BIST tarama" | `screener_bullish(exchange="BIST")` |
-| "EGX hisseleri" | `egx_stock_screen()` |
+| "Strong bullish stocks" | `screener_bullish(exchange="NASDAQ")` |
+| "Find oversold stocks" | `screener_oversold(exchange="NASDAQ")` |
+| "Scan Turkish BIST stocks" | `screener_bullish(exchange="BIST")` |
+| "Egyptian Exchange stocks" | `egx_stock_screen()` |
 
 ## Example Response Formats
 
